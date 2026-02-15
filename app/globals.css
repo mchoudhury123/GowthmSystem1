@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Growthm Brand Colors - Premium Dark Theme */
+  --background: #0a0a0a;
+  --foreground: #f5f5f5;
+
+  /* Charcoal shades - Deep backgrounds */
+  --charcoal: #141414;
+  --charcoal-light: #1a1a1a;
+  --charcoal-lighter: #242424;
+
+  /* Gold accents - Primary brand color */
+  --gold: #d4af37;
+  --gold-light: #e8c968;
+  --gold-dark: #b8941f;
+
+  /* Champagne accents - Secondary highlights */
+  --champagne: #f7e7ce;
+  --champagne-light: #faf3e6;
+
+  /* Verdict accent colors */
+  --accent-green: #10b981;
+  --accent-red: #ef4444;
+  --accent-amber: #f59e0b;
+}
+
+@layer base {
+  * {
+    @apply border-charcoal-lighter;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-semibold tracking-tight;
+  }
+
+  h1 {
+    @apply text-3xl;
+  }
+
+  h2 {
+    @apply text-2xl;
+  }
+
+  h3 {
+    @apply text-xl;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .card-shadow {
+    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.5), 0 1px 2px -1px rgb(0 0 0 / 0.5);
+  }
+
+  .card-shadow-lg {
+    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.5), 0 2px 4px -2px rgb(0 0 0 / 0.5);
+  }
+
+  .gold-glow {
+    box-shadow: 0 0 20px rgba(212, 175, 55, 0.15);
+  }
+}
