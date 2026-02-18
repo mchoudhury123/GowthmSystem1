@@ -12,6 +12,8 @@ import CadenceChart from "@/components/charts/CadenceChart";
 import LikeRateChart from "@/components/charts/LikeRateChart";
 import { getActiveCreatorId } from "@/lib/creatorContext";
 import { recomputeDashboardCache, retryFailedVideo } from "@/lib/api";
+import ConfidenceSnapshotCard from "@/components/ConfidenceSnapshot";
+import AnalysisProgress from "@/components/AnalysisProgress";
 
 interface DashboardData {
   creator: any;
@@ -27,6 +29,11 @@ interface DashboardData {
     analyzing: number;
     done: number;
     failed: number;
+  };
+  analysis_progress?: {
+    analyzed_count: number;
+    total_ingested: number;
+    analysis_ready: boolean;
   };
   cached_dashboard: any;
 }
@@ -136,7 +143,7 @@ export default function OverviewPage() {
     );
   }
 
-  const { weekly_summary, recent_videos, processing_stats, cached_dashboard, creator_profile } = data;
+  const { weekly_summary, recent_videos, processing_stats, cached_dashboard, creator_profile, analysis_progress } = data;
 
   const videosWithInsights = recent_videos.filter((v) => v.insight);
   const verdictCounts = cached_dashboard?.verdictCounts || {
@@ -196,6 +203,21 @@ export default function OverviewPage() {
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {/* Confidence Snapshot OR Analysis Progress */}
+      {analysis_progress && (
+        analysis_progress.analysis_ready && cached_dashboard?.confidenceSnapshot ? (
+          <ConfidenceSnapshotCard
+            snapshot={cached_dashboard.confidenceSnapshot}
+            verdictCounts={verdictCounts}
+          />
+        ) : (
+          <AnalysisProgress
+            analyzedCount={analysis_progress.analyzed_count}
+            totalIngested={analysis_progress.total_ingested}
+          />
+        )
       )}
 
       {/* Stats Grid */}

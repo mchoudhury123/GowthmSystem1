@@ -10,11 +10,13 @@ export async function POST(
     const { id } = await params;
 
     // Reset video status to PENDING (only if currently FAILED)
+    // Setting analysis_status = PENDING signals an explicit re-run to the worker
     const { data: video, error } = await supabaseServer
       .from("videos")
       .update({
         processing_status: "PENDING",
         processing_error: null,
+        analysis_status: "PENDING",
       })
       .eq("id", id)
       .eq("processing_status", "FAILED")

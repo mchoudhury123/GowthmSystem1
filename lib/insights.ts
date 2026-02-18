@@ -1,5 +1,6 @@
 // Kimi (Moonshot) Insights Generation with Zod Validation
 import { z } from "zod";
+import { MAX_FRAMES_PER_VIDEO } from "@/lib/config";
 
 const KIMI_API_KEY = process.env.KIMI_API_KEY;
 const KIMI_API_URL = "https://api.moonshot.ai/v1/chat/completions";
@@ -348,8 +349,8 @@ Return STRICT JSON only.`,
     },
   ];
 
-  // Add frame images (up to 12, detail: low to reduce cost)
-  for (const url of frameUrls.slice(0, 12)) {
+  // Add frame images (capped, detail: low to reduce cost)
+  for (const url of frameUrls.slice(0, MAX_FRAMES_PER_VIDEO)) {
     content.push({
       type: "image_url",
       image_url: { url, detail: "low" },

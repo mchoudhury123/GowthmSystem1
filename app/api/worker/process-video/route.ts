@@ -4,9 +4,20 @@ import { downloadAndExtractAudio, cleanupTempFiles } from "@/lib/videoProcessing
 import { transcribeAudio } from "@/lib/transcription";
 import { generateInsights, generateMultimodalInsights } from "@/lib/insights";
 import { extractAndUploadFrames } from "@/lib/frameExtraction";
+import { computeAnalysisHash } from "@/lib/analysisHash";
+import { ANALYSIS_VERSION } from "@/lib/config";
 import type { ProcessVideoJob } from "@/lib/queue";
 
 const WORKER_SECRET = process.env.WORKER_SECRET || "dev-secret-change-in-production";
+
+// Helper: update job_runs.stage for Queue page visibility
+async function updateJobStage(jobRunId: string | undefined, stage: string) {
+  if (!jobRunId) return;
+  await supabaseServer
+    .from("job_runs")
+    .update({ stage, updated_at: new Date().toISOString() })
+    .eq("id", jobRunId);
+}
 
 export async function POST(request: NextRequest) {
   // Security: Check worker secret
@@ -38,28 +49,37 @@ export async function POST(request: NextRequest) {
       throw new Error("Video source_url is missing");
     }
 
-    // Check if insight already exists (never re-analyze automatically)
+    // ── Analysis-once guard (version-aware) ──
     const { data: existingInsight } = await supabaseServer
       .from("video_insights")
-      .select("id")
+      .select("id, analysis_version, analysis_hash")
       .eq("video_id", videoId)
       .single();
 
-    if (existingInsight) {
-      console.log(`[Worker:ProcessVideo] Insight already exists for ${videoId}, skipping`);
-      await supabaseServer
-        .from("videos")
-        .update({ processing_status: "DONE", processing_error: null })
-        .eq("id", videoId);
-      return NextResponse.json({
-        success: true,
-        videoId,
-        skipped: true,
-        message: "Insight already exists",
-      });
+    if (existingInsight && existingInsight.analysis_version === ANALYSIS_VERSION) {
+      // Same version insight exists. Only proceed if this is an explicit re-run
+      // (retry endpoint sets both processing_status and analysis_status to PENDING)
+      const isExplicitRerun =
+        video.analysis_status === "PENDING" && video.processing_status === "PENDING";
+
+      if (!isExplicitRerun) {
+        console.log(
+          `[Worker:ProcessVideo] Insight v${ANALYSIS_VERSION} already exists for ${videoId}, skipping`
+        );
+        await supabaseServer
+          .from("videos")
+          .update({ processing_status: "DONE", processing_error: null })
+          .eq("id", videoId);
+        return NextResponse.json({
+          success: true,
+          videoId,
+          skipped: true,
+          message: "Insight already exists at current version",
+        });
+      }
     }
 
-    // Update job_runs
+    // Insert job_run record
     const { data: jobRun } = await supabaseServer
       .from("job_runs")
       .insert({
@@ -73,44 +93,74 @@ export async function POST(request: NextRequest) {
       .single();
 
     try {
-      // Step 1: Download video and extract audio
-      await supabaseServer
-        .from("videos")
-        .update({ processing_status: "DOWNLOADING" })
-        .eq("id", videoId);
+      let transcript: string;
+      let videoPath: string | undefined;
 
-      console.log(`[Worker:ProcessVideo] Downloading video from ${video.source_url}`);
+      // ── Skip re-download + re-transcription if transcript already exists ──
+      // Saves Whisper credits on retries that failed during ANALYZING
+      if (video.transcript && video.transcript.length > 0) {
+        console.log(`[Worker:ProcessVideo] Reusing existing transcript (${video.transcript.length} chars)`);
+        transcript = video.transcript;
+      } else {
+        // Step 1: Download video and extract audio
+        await supabaseServer
+          .from("videos")
+          .update({ processing_status: "DOWNLOADING" })
+          .eq("id", videoId);
+        await updateJobStage(jobRun?.id, "DOWNLOADING");
 
-      const { videoPath, audioPath } = await downloadAndExtractAudio(video.source_url, videoId);
+        console.log(`[Worker:ProcessVideo] Downloading video from ${video.source_url}`);
 
-      // Step 2: Transcribe audio
-      await supabaseServer
-        .from("videos")
-        .update({ processing_status: "TRANSCRIBING" })
-        .eq("id", videoId);
+        const downloaded = await downloadAndExtractAudio(video.source_url, videoId);
+        videoPath = downloaded.videoPath;
 
-      console.log(`[Worker:ProcessVideo] Transcribing audio...`);
+        // Step 2: Transcribe audio
+        await supabaseServer
+          .from("videos")
+          .update({ processing_status: "TRANSCRIBING" })
+          .eq("id", videoId);
+        await updateJobStage(jobRun?.id, "TRANSCRIBING");
 
-      const transcript = await transcribeAudio(audioPath);
+        console.log(`[Worker:ProcessVideo] Transcribing audio...`);
 
-      // Save transcript
-      await supabaseServer
-        .from("videos")
-        .update({ transcript })
-        .eq("id", videoId);
+        transcript = await transcribeAudio(downloaded.audioPath);
 
-      console.log(`[Worker:ProcessVideo] Transcript: ${transcript.substring(0, 100)}...`);
+        // Save transcript immediately so retries can skip this step
+        await supabaseServer
+          .from("videos")
+          .update({ transcript })
+          .eq("id", videoId);
 
-      // Step 3: Extract keyframes
+        console.log(`[Worker:ProcessVideo] Transcript: ${transcript.substring(0, 100)}...`);
+
+        // Track Whisper usage
+        const currentMonth = new Date().toISOString().slice(0, 7);
+        await supabaseServer.rpc("increment_usage", {
+          p_creator_id: video.creator_id,
+          p_month: currentMonth,
+          p_field: "whisper_calls",
+          p_amount: 1,
+        });
+      }
+
+      // Step 3: Extract keyframes (re-download video if we skipped it)
       await supabaseServer
         .from("videos")
         .update({ processing_status: "EXTRACTING_FRAMES" })
         .eq("id", videoId);
+      await updateJobStage(jobRun?.id, "EXTRACTING_FRAMES");
 
       console.log(`[Worker:ProcessVideo] Extracting keyframes...`);
 
       let frameUrls: string[] = [];
+      let framePaths: string[] = [];
       try {
+        // If we skipped download, we need the video file for frame extraction
+        if (!videoPath) {
+          const downloaded = await downloadAndExtractAudio(video.source_url, videoId);
+          videoPath = downloaded.videoPath;
+        }
+
         const frames = await extractAndUploadFrames(
           videoPath,
           videoId,
@@ -127,20 +177,68 @@ export async function POST(request: NextRequest) {
             meta: { index: f.index, timestamp: f.timestamp },
           }));
 
-          await supabaseServer.from("video_assets").insert(assetRows);
+          // Use upsert to prevent duplicate frame assets on retry
+          await supabaseServer
+            .from("video_assets")
+            .upsert(assetRows, { onConflict: "video_id,storage_path" });
+
           frameUrls = frames.map((f) => f.publicUrl);
+          framePaths = frames.map((f) => f.storagePath);
           console.log(`[Worker:ProcessVideo] Stored ${frames.length} frames`);
+
+          // Track frame extraction usage
+          const frameMonth = new Date().toISOString().slice(0, 7);
+          await supabaseServer.rpc("increment_usage", {
+            p_creator_id: video.creator_id,
+            p_month: frameMonth,
+            p_field: "frames_extracted",
+            p_amount: frames.length,
+          });
         }
       } catch (frameError) {
         // Frame extraction failure is non-fatal; continue with text-only analysis
         console.warn(`[Worker:ProcessVideo] Frame extraction failed (non-fatal):`, frameError);
       }
 
+      // ── Compute analysis hash and check for redundant LLM call ──
+      const currentHash = computeAnalysisHash(transcript, video.caption, framePaths);
+
+      if (
+        existingInsight &&
+        existingInsight.analysis_hash === currentHash &&
+        existingInsight.analysis_version === ANALYSIS_VERSION
+      ) {
+        console.log(
+          `[Worker:ProcessVideo] Analysis hash unchanged for ${videoId}, skipping LLM call`
+        );
+        await supabaseServer
+          .from("videos")
+          .update({
+            processing_status: "DONE",
+            processing_error: null,
+            analysis_status: "DONE",
+            analysis_hash: currentHash,
+            analysis_version: ANALYSIS_VERSION,
+          })
+          .eq("id", videoId);
+
+        if (jobRun) {
+          await supabaseServer
+            .from("job_runs")
+            .update({ status: "DONE", updated_at: new Date().toISOString() })
+            .eq("id", jobRun.id);
+        }
+        await cleanupTempFiles(videoId);
+
+        return NextResponse.json({ success: true, videoId, skipped: true, reason: "hash_match" });
+      }
+
       // Step 4: Generate insights (multimodal if frames available)
       await supabaseServer
         .from("videos")
-        .update({ processing_status: "ANALYZING" })
+        .update({ processing_status: "ANALYZING", analysis_status: "RUNNING" })
         .eq("id", videoId);
+      await updateJobStage(jobRun?.id, "ANALYZING");
 
       console.log(
         `[Worker:ProcessVideo] Generating insights (${frameUrls.length > 0 ? "multimodal" : "text-only"})...`
@@ -167,7 +265,7 @@ export async function POST(request: NextRequest) {
         insights = { ...textInsights, visual_notes: undefined };
       }
 
-      // Step 5: Save insights
+      // Step 5: Save insights with version + hash
       const { error: insightError } = await supabaseServer
         .from("video_insights")
         .upsert(
@@ -179,6 +277,8 @@ export async function POST(request: NextRequest) {
             labels_json: insights.labels,
             visual_notes_json: insights.visual_notes || null,
             cta_analysis_json: insights.cta_analysis || null,
+            analysis_version: ANALYSIS_VERSION,
+            analysis_hash: currentHash,
           },
           { onConflict: "video_id" }
         );
@@ -187,16 +287,70 @@ export async function POST(request: NextRequest) {
         throw new Error(`Failed to save insights: ${insightError.message}`);
       }
 
+      // Track LLM usage
+      const llmMonth = new Date().toISOString().slice(0, 7);
+      await supabaseServer.rpc("increment_usage", {
+        p_creator_id: video.creator_id,
+        p_month: llmMonth,
+        p_field: "llm_calls",
+        p_amount: 1,
+      });
+      await supabaseServer.rpc("increment_usage", {
+        p_creator_id: video.creator_id,
+        p_month: llmMonth,
+        p_field: "videos_analyzed",
+        p_amount: 1,
+      });
+
       // Step 6: Mark as done
       await supabaseServer
         .from("videos")
         .update({
           processing_status: "DONE",
           processing_error: null,
+          analysis_status: "DONE",
+          analysis_version: ANALYSIS_VERSION,
+          analysis_hash: currentHash,
         })
         .eq("id", videoId);
 
       console.log(`[Worker:ProcessVideo] Processing complete for video ${videoId}`);
+
+      // Auto-trigger dashboard cache when reaching 5 analyzed videos
+      try {
+        const { count: doneCount } = await supabaseServer
+          .from("videos")
+          .select("*", { count: "exact", head: true })
+          .eq("creator_id", video.creator_id)
+          .eq("processing_status", "DONE");
+
+        const { data: existingCache } = await supabaseServer
+          .from("creator_cached_dashboard")
+          .select("computed_at")
+          .eq("creator_id", video.creator_id)
+          .single();
+
+        if ((doneCount || 0) >= 5 && !existingCache) {
+          console.log(
+            `[Worker:ProcessVideo] Auto-computing dashboard cache for creator ${video.creator_id} (${doneCount} videos done)`
+          );
+          const { computeDashboardCache } = await import("@/lib/computeDashboard");
+          const cache = await computeDashboardCache(video.creator_id);
+          await supabaseServer
+            .from("creator_cached_dashboard")
+            .upsert(
+              {
+                creator_id: video.creator_id,
+                cache_json: cache,
+                computed_at: cache.computedAt,
+              },
+              { onConflict: "creator_id" }
+            );
+          console.log(`[Worker:ProcessVideo] Dashboard cache auto-computed for creator ${video.creator_id}`);
+        }
+      } catch (cacheError) {
+        console.warn("[Worker:ProcessVideo] Auto-cache computation failed (non-fatal):", cacheError);
+      }
 
       // Cleanup temp files
       await cleanupTempFiles(videoId);
@@ -207,6 +361,7 @@ export async function POST(request: NextRequest) {
           .from("job_runs")
           .update({
             status: "DONE",
+            stage: "DONE",
             updated_at: new Date().toISOString(),
           })
           .eq("id", jobRun.id);
@@ -219,6 +374,8 @@ export async function POST(request: NextRequest) {
         transcriptLength: transcript.length,
         framesExtracted: frameUrls.length,
         multimodal: frameUrls.length > 0,
+        analysisVersion: ANALYSIS_VERSION,
+        analysisHash: currentHash,
       });
     } catch (error) {
       // Mark video as failed
@@ -227,6 +384,7 @@ export async function POST(request: NextRequest) {
         .update({
           processing_status: "FAILED",
           processing_error: error instanceof Error ? error.message : "Unknown error",
+          analysis_status: "FAILED",
         })
         .eq("id", videoId);
 

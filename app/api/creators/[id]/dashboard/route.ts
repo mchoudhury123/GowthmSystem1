@@ -102,6 +102,24 @@ export async function GET(
       failed: recent_videos.filter((v: any) => v.processing_status === "FAILED").length,
     };
 
+    // Global analysis progress (counts across ALL videos, not just top 30)
+    const { count: globalDoneCount } = await supabaseServer
+      .from("videos")
+      .select("*", { count: "exact", head: true })
+      .eq("creator_id", id)
+      .eq("processing_status", "DONE");
+
+    const { count: globalTotalCount } = await supabaseServer
+      .from("videos")
+      .select("*", { count: "exact", head: true })
+      .eq("creator_id", id);
+
+    const analysis_progress = {
+      analyzed_count: globalDoneCount || 0,
+      total_ingested: globalTotalCount || 0,
+      analysis_ready: (globalDoneCount || 0) >= 5,
+    };
+
     // Fetch cached dashboard
     const { data: cachedDashboard } = await supabaseServer
       .from("creator_cached_dashboard")
@@ -115,6 +133,7 @@ export async function GET(
       weekly_summary,
       recent_videos,
       processing_stats,
+      analysis_progress,
       cached_dashboard: cachedDashboard?.cache_json || null,
     });
   } catch (error) {

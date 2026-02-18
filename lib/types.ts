@@ -14,6 +14,8 @@ export type ProcessingStatus =
   | "DONE"
   | "FAILED";
 
+export type AnalysisStatus = "PENDING" | "RUNNING" | "DONE" | "FAILED" | "STALE";
+
 export interface InsightLabels {
   hook_type: HookType;
   format: Format;
@@ -38,6 +40,8 @@ export interface VideoInsight {
   labels: InsightLabels;
   visual_notes?: string[] | null;
   cta_analysis?: CTAAnalysis | null;
+  analysis_version?: number;
+  analysis_hash?: string | null;
   created_at: string;
 }
 
@@ -55,6 +59,9 @@ export interface Video {
   processing_status?: ProcessingStatus;
   processing_error?: string | null;
   transcript?: string | null;
+  analysis_version?: number;
+  analysis_status?: AnalysisStatus;
+  analysis_hash?: string | null;
   created_at: string;
   created_at_ts?: string;
   insight?: VideoInsight;
@@ -90,6 +97,11 @@ export interface DashboardData {
     analyzing: number;
     done: number;
     failed: number;
+  };
+  analysis_progress?: {
+    analyzed_count: number;
+    total_ingested: number;
+    analysis_ready: boolean;
   };
   cached_dashboard?: CachedDashboard | null;
 }
@@ -140,6 +152,38 @@ export interface VideoAsset {
   meta: Record<string, unknown>;
 }
 
+// --- Creator Usage (monthly cost tracking) ---
+export interface CreatorUsage {
+  id: string;
+  creator_id: string;
+  month: string;
+  videos_ingested: number;
+  videos_analyzed: number;
+  llm_calls: number;
+  frames_extracted: number;
+  whisper_calls: number;
+  created_at: string;
+  updated_at: string;
+}
+
+// --- Job Run ---
+export type JobType = "INGEST_CREATOR" | "PROCESS_VIDEO";
+export type JobStatus = "QUEUED" | "RUNNING" | "DONE" | "FAILED";
+
+export interface JobRun {
+  id: string;
+  creator_id: string;
+  video_id?: string | null;
+  job_type: JobType;
+  status: JobStatus;
+  stage?: string | null;
+  attempts: number;
+  error_message?: string | null;
+  payload?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
 // --- Cached Dashboard ---
 export interface CachedDashboard {
   profile: CreatorProfile | null;
@@ -179,5 +223,28 @@ export interface CachedDashboard {
     action: string;
     exampleVideoIds: string[];
   }>;
+  confidenceSnapshot?: ConfidenceSnapshot;
   computedAt: string;
+}
+
+// --- Confidence Snapshot (unlocks at 5 analyzed videos) ---
+export interface ConfidenceSnapshot {
+  analyzedCount: number;
+  totalVideosIngested: number;
+  bestHookType: {
+    hookType: HookType;
+    avgLikeRate: number;
+    videoCount: number;
+  } | null;
+  bestLengthBucket: {
+    lengthBucket: LengthBucket;
+    avgLikeRate: number;
+    videoCount: number;
+  } | null;
+  postThisNext: {
+    hookType: HookType;
+    lengthBucket: LengthBucket;
+    avgLikeRate: number;
+    sampleCaption: string;
+  } | null;
 }

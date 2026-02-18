@@ -1,5 +1,5 @@
 import { supabaseServer } from "./supabaseServer";
-import type { CachedDashboard } from "./types";
+import type { CachedDashboard, ConfidenceSnapshot, HookType, LengthBucket } from "./types";
 
 export async function computeDashboardCache(creatorId: string): Promise<CachedDashboard> {
   // 1. Fetch profile
@@ -24,7 +24,7 @@ export async function computeDashboardCache(creatorId: string): Promise<CachedDa
   // 3. Fetch all videos
   const { data: videos } = await supabaseServer
     .from("videos")
-    .select("id, views, likes, comments, duration_s, created_at_ts, processing_status")
+    .select("id, caption, views, likes, comments, duration_s, created_at_ts, processing_status")
     .eq("creator_id", creatorId);
 
   const videoIds = (videos || []).map((v: any) => v.id);
@@ -82,6 +82,102 @@ export async function computeDashboardCache(creatorId: string): Promise<CachedDa
       verdictCounts[ins.verdict as keyof typeof verdictCounts]++;
     }
   }
+
+  // 6.5 Confidence Snapshot
+  const doneVideos = (videos || []).filter((v: any) => v.processing_status === "DONE");
+  const analyzedWithInsights = doneVideos
+    .filter((v: any) => insightMap[v.id])
+    .map((v: any) => ({
+      ...v,
+      insight: insightMap[v.id],
+      videoLikeRate: v.views > 0 ? (v.likes / v.views) * 100 : 0,
+    }));
+
+  // Best hook type by avg like_rate
+  let bestHookType: ConfidenceSnapshot["bestHookType"] = null;
+  const hookGroups: Record<string, { totalRate: number; count: number }> = {};
+  for (const v of analyzedWithInsights) {
+    const ht = v.insight.labels_json?.hook_type;
+    if (!ht) continue;
+    if (!hookGroups[ht]) hookGroups[ht] = { totalRate: 0, count: 0 };
+    hookGroups[ht].totalRate += v.videoLikeRate;
+    hookGroups[ht].count += 1;
+  }
+  let bestHookAvg = -1;
+  for (const [hookType, data] of Object.entries(hookGroups)) {
+    const avg = data.count > 0 ? data.totalRate / data.count : 0;
+    if (avg > bestHookAvg) {
+      bestHookAvg = avg;
+      bestHookType = {
+        hookType: hookType as HookType,
+        avgLikeRate: Math.round(avg * 100) / 100,
+        videoCount: data.count,
+      };
+    }
+  }
+
+  // Best length bucket by avg like_rate
+  let bestLengthBucket: ConfidenceSnapshot["bestLengthBucket"] = null;
+  const bucketGroups: Record<string, { totalRate: number; count: number }> = {};
+  for (const v of analyzedWithInsights) {
+    const lb = v.insight.labels_json?.length_bucket;
+    if (!lb) continue;
+    if (!bucketGroups[lb]) bucketGroups[lb] = { totalRate: 0, count: 0 };
+    bucketGroups[lb].totalRate += v.videoLikeRate;
+    bucketGroups[lb].count += 1;
+  }
+  let bestBucketAvg = -1;
+  for (const [bucket, data] of Object.entries(bucketGroups)) {
+    const avg = data.count > 0 ? data.totalRate / data.count : 0;
+    if (avg > bestBucketAvg) {
+      bestBucketAvg = avg;
+      bestLengthBucket = {
+        lengthBucket: bucket as LengthBucket,
+        avgLikeRate: Math.round(avg * 100) / 100,
+        videoCount: data.count,
+      };
+    }
+  }
+
+  // Post This Next — cluster by (hook_type, length_bucket), pick highest avg like_rate
+  let postThisNext: ConfidenceSnapshot["postThisNext"] = null;
+  const clusterGroups: Record<string, { totalRate: number; count: number; bestVideo: any }> = {};
+  for (const v of analyzedWithInsights) {
+    const ht = v.insight.labels_json?.hook_type;
+    const lb = v.insight.labels_json?.length_bucket;
+    if (!ht || !lb) continue;
+    const key = `${ht}|${lb}`;
+    if (!clusterGroups[key]) {
+      clusterGroups[key] = { totalRate: 0, count: 0, bestVideo: v };
+    }
+    clusterGroups[key].totalRate += v.videoLikeRate;
+    clusterGroups[key].count += 1;
+    if (v.videoLikeRate > (clusterGroups[key].bestVideo?.videoLikeRate || 0)) {
+      clusterGroups[key].bestVideo = v;
+    }
+  }
+  let bestClusterAvg = -1;
+  for (const [key, data] of Object.entries(clusterGroups)) {
+    const avg = data.count > 0 ? data.totalRate / data.count : 0;
+    if (avg > bestClusterAvg) {
+      bestClusterAvg = avg;
+      const [hookType, lengthBucket] = key.split("|");
+      postThisNext = {
+        hookType: hookType as HookType,
+        lengthBucket: lengthBucket as LengthBucket,
+        avgLikeRate: Math.round(avg * 100) / 100,
+        sampleCaption: data.bestVideo?.caption || "",
+      };
+    }
+  }
+
+  const confidenceSnapshot: ConfidenceSnapshot = {
+    analyzedCount: doneVideos.length,
+    totalVideosIngested: totalV,
+    bestHookType,
+    bestLengthBucket,
+    postThisNext,
+  };
 
   // 7. Count labels
   function countLabels(filteredInsights: any[]) {
@@ -151,6 +247,7 @@ export async function computeDashboardCache(creatorId: string): Promise<CachedDa
     topStopLabels,
     whatToDoNext,
     whatToStop,
+    confidenceSnapshot,
     computedAt: new Date().toISOString(),
   };
 }

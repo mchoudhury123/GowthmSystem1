@@ -4,9 +4,11 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import { supabaseServer } from "./supabaseServer";
 
+import { MAX_FRAMES_PER_VIDEO } from "@/lib/config";
+
 const execAsync = promisify(exec);
 const BUCKET_NAME = "growthm";
-const FRAME_COUNT = 12;
+const FRAME_COUNT = MAX_FRAMES_PER_VIDEO;
 
 export interface ExtractedFrame {
   storagePath: string;

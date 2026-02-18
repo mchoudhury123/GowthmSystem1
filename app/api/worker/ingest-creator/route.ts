@@ -88,25 +88,53 @@ export async function POST(request: NextRequest) {
         throw new Error("No videos found for this handle");
       }
 
-      // 2. Upsert videos to database
+      // ── 2. Idempotent video upsert ──
+      // Phase A: Insert ONLY genuinely new videos (ignoreDuplicates: true)
+      // This prevents resetting processing_status on existing videos.
       const normalizedVideos = videos.map((v) => ({
         ...normalizeApifyVideo(v),
         creator_id: creatorId,
       }));
 
-      const { data: insertedVideos, error: insertError } = await supabaseServer
+      const { error: insertError } = await supabaseServer
         .from("videos")
         .upsert(normalizedVideos, {
           onConflict: "tiktok_id",
-          ignoreDuplicates: false,
-        })
-        .select("id, processing_status");
+          ignoreDuplicates: true,
+        });
 
       if (insertError) {
         throw new Error(`Failed to insert videos: ${insertError.message}`);
       }
 
-      console.log(`[Worker:IngestCreator] Upserted ${insertedVideos?.length || 0} videos`);
+      // Phase B: Update engagement metrics on ALL videos (new + existing)
+      // Crucially, this NEVER touches processing_status or analysis_status.
+      const tiktokIds = normalizedVideos.map((v) => v.tiktok_id).filter(Boolean);
+      for (const nv of normalizedVideos) {
+        if (!nv.tiktok_id) continue;
+        await supabaseServer
+          .from("videos")
+          .update({
+            views: nv.views,
+            likes: nv.likes,
+            comments: nv.comments,
+            thumb_url: nv.thumb_url,
+            source_url: nv.source_url,
+          })
+          .eq("tiktok_id", nv.tiktok_id);
+      }
+
+      // Phase C: Find genuinely PENDING videos for this creator to enqueue
+      const { data: pendingVideos } = await supabaseServer
+        .from("videos")
+        .select("id")
+        .eq("creator_id", creatorId)
+        .eq("processing_status", "PENDING")
+        .in("tiktok_id", tiktokIds);
+
+      console.log(
+        `[Worker:IngestCreator] Upserted ${normalizedVideos.length} videos, ${pendingVideos?.length || 0} need processing`
+      );
 
       // 3. Update creator last_ingested_at
       await supabaseServer
@@ -114,17 +142,29 @@ export async function POST(request: NextRequest) {
         .update({ last_ingested_at: new Date().toISOString() })
         .eq("id", creatorId);
 
-      // 4. Enqueue process_video jobs for new/pending videos
+      // ── 4. Enqueue with dedup ──
       const queue = getQueue();
       let enqueuedCount = 0;
 
-      for (const video of insertedVideos || []) {
-        if (video.processing_status === "PENDING") {
-          await queue.enqueue(QUEUE_NAMES.PROCESS_VIDEO, {
-            videoId: video.id,
-          });
+      for (const video of pendingVideos || []) {
+        const jobId = await queue.enqueue(QUEUE_NAMES.PROCESS_VIDEO, {
+          videoId: video.id,
+        });
+        if (jobId) {
           enqueuedCount++;
         }
+        // jobId === null means it was already in the queue (dedup)
+      }
+
+      // Track usage
+      const month = new Date().toISOString().slice(0, 7);
+      if (enqueuedCount > 0) {
+        await supabaseServer.rpc("increment_usage", {
+          p_creator_id: creatorId,
+          p_month: month,
+          p_field: "videos_ingested",
+          p_amount: enqueuedCount,
+        });
       }
 
       console.log(`[Worker:IngestCreator] Enqueued ${enqueuedCount} video processing jobs`);
@@ -143,7 +183,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         success: true,
         videosFound: videos.length,
-        videosUpserted: insertedVideos?.length || 0,
+        videosUpserted: normalizedVideos.length,
         jobsEnqueued: enqueuedCount,
       });
     } catch (error) {

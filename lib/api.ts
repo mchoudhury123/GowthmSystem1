@@ -72,6 +72,22 @@ export async function retryFailedVideo(videoId: string) {
   return response.json();
 }
 
+export async function fetchQueueData(creatorId: string) {
+  const response = await fetch(`/api/creators/${creatorId}/queue`);
+  if (!response.ok) {
+    throw new Error("Failed to fetch queue data");
+  }
+  return response.json();
+}
+
+export async function recoverStuckJobs() {
+  const response = await fetch("/api/jobs/recover", { method: "POST" });
+  if (!response.ok) {
+    throw new Error("Failed to recover stuck jobs");
+  }
+  return response.json();
+}
+
 export async function fetchVideoAssets(videoId: string) {
   const response = await fetch(`/api/videos/${videoId}/assets`);
 
