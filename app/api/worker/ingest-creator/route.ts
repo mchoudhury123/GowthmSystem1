@@ -180,6 +180,14 @@ export async function POST(request: NextRequest) {
           .eq("id", jobRun.id);
       }
 
+      // Recompute creator playbook (debounced, non-fatal)
+      try {
+        const { computeCreatorPlaybook } = await import("@/lib/computePlaybook");
+        await computeCreatorPlaybook(creatorId);
+      } catch (playbookError) {
+        console.warn("[Worker:IngestCreator] Playbook computation failed (non-fatal):", playbookError);
+      }
+
       return NextResponse.json({
         success: true,
         videosFound: videos.length,

@@ -40,6 +40,7 @@ export interface VideoInsight {
   labels: InsightLabels;
   visual_notes?: string[] | null;
   cta_analysis?: CTAAnalysis | null;
+  recommendations?: VideoRecommendations | null;
   analysis_version?: number;
   analysis_hash?: string | null;
   created_at: string;
@@ -67,11 +68,41 @@ export interface Video {
   insight?: VideoInsight;
 }
 
+// --- Weekly Snapshot ---
+export interface WeeklySnapshotData {
+  avg_duration_s: number;
+  avg_like_rate: number;
+  hook_distribution: Record<string, number>;
+  format_distribution: Record<string, number>;
+  cta_timing_distribution: Record<string, number>;
+  cta_success_rate: number;
+  posting_cadence: number;
+  video_count: number;
+  total_views: number;
+  total_likes: number;
+}
+
+export interface WeeklyDeltas {
+  avg_duration_s_pct: number | null;
+  avg_like_rate_pct: number | null;
+  posting_cadence_pct: number | null;
+  total_views_pct: number | null;
+  total_likes_pct: number | null;
+}
+
+export type DriftFlag = "Length Drift" | "Consistency Drop" | "Hook Experimentation Phase";
+
 export interface WeeklySummary {
   id: string;
   creator_id: string;
+  week_start?: string;
   do_more: string[];
   stop_doing: string[];
+  snapshot?: WeeklySnapshotData | null;
+  deltas?: WeeklyDeltas | null;
+  drift_flags?: DriftFlag[];
+  insight_bullets?: string[];
+  recommendation?: string | null;
   created_at: string;
 }
 
@@ -80,6 +111,7 @@ export interface Creator {
   handle: string;
   niche: string | null;
   last_ingested_at?: string;
+  last_login_at?: string | null;
   created_at: string;
 }
 
@@ -247,4 +279,83 @@ export interface ConfidenceSnapshot {
     avgLikeRate: number;
     sampleCaption: string;
   } | null;
+}
+
+// --- Instruction-Level Recommendations (v2) ---
+export interface RepeatRecommendations {
+  template_structure: {
+    hook_type: string;
+    body_format: string;
+    cta_timing_window: string;
+  };
+  hook_rewrites: string[];
+  suggested_next_topic: string;
+}
+
+export interface ModifyRecommendations {
+  change_instructions: Array<{
+    instruction: string;
+    reasoning: string;
+  }>;
+  performance_delta: {
+    video_like_rate: number;
+    creator_median_like_rate: number | null;
+    delta_description: string;
+  } | null;
+}
+
+export interface StopRecommendations {
+  pattern_explanation: string;
+  cluster_failure_reason: string;
+  suggested_alternative: {
+    format: string;
+    hook_type: string;
+    length_bucket: string;
+    reasoning: string;
+  };
+}
+
+export type VideoRecommendations =
+  | RepeatRecommendations
+  | ModifyRecommendations
+  | StopRecommendations;
+
+// --- Creator Playbook ---
+export type ExperimentStatus = "Stable" | "Testing New Hook" | "Testing New Format";
+
+export interface CreatorPlaybook {
+  id: string;
+  creator_id: string;
+  dominant_hook_type: string;
+  dominant_format: string;
+  dominant_length_bucket: string;
+  dominant_cta_window: string;
+  supporting_video_count: number;
+  avg_like_rate: number;
+  median_like_rate: number;
+  performance_delta_percent: number;
+  experiment_status: ExperimentStatus;
+  computed_at: string;
+}
+
+// --- Creator Next Post ---
+export interface CreatorNextPost {
+  id: string;
+  creator_id: string;
+  hook_type: string;
+  format: string;
+  length_bucket: string;
+  cta_window: string;
+  suggested_topic: string;
+  hook_variant_1: string;
+  hook_variant_2: string;
+  hook_variant_3: string;
+  structure_outline: {
+    hook: string;
+    problem: string;
+    solution: string;
+    cta: string;
+  };
+  based_on_cluster_video_count: number;
+  generated_at: string;
 }

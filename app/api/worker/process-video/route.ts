@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { downloadAndExtractAudio, cleanupTempFiles } from "@/lib/videoProcessing";
 import { transcribeAudio } from "@/lib/transcription";
-import { generateInsights, generateMultimodalInsights } from "@/lib/insights";
+import { generateInsights, generateMultimodalInsights, type CreatorContext } from "@/lib/insights";
 import { extractAndUploadFrames } from "@/lib/frameExtraction";
 import { computeAnalysisHash } from "@/lib/analysisHash";
 import { ANALYSIS_VERSION } from "@/lib/config";
@@ -244,6 +244,58 @@ export async function POST(request: NextRequest) {
         `[Worker:ProcessVideo] Generating insights (${frameUrls.length > 0 ? "multimodal" : "text-only"})...`
       );
 
+      // Fetch creator context for recommendations
+      let creatorContext: CreatorContext = {
+        medianLikeRate: null,
+        bestHookType: null,
+        bestLengthBucket: null,
+        analyzedCount: 0,
+      };
+
+      try {
+        const { data: otherVideos } = await supabaseServer
+          .from("videos")
+          .select("id, views, likes")
+          .eq("creator_id", video.creator_id)
+          .eq("processing_status", "DONE")
+          .neq("id", videoId);
+
+        if (otherVideos && otherVideos.length > 0) {
+          const rates = otherVideos
+            .filter((v: any) => v.views > 0)
+            .map((v: any) => (v.likes / v.views) * 100)
+            .sort((a: number, b: number) => a - b);
+          creatorContext.medianLikeRate =
+            rates.length > 0 ? rates[Math.floor(rates.length / 2)] : null;
+          creatorContext.analyzedCount = otherVideos.length;
+
+          const otherIds = otherVideos.map((v: any) => v.id);
+          const { data: otherInsights } = await supabaseServer
+            .from("video_insights")
+            .select("video_id, verdict, labels_json")
+            .in("video_id", otherIds)
+            .eq("verdict", "REPEAT");
+
+          if (otherInsights && otherInsights.length > 0) {
+            const hookCounts: Record<string, number> = {};
+            const bucketCounts: Record<string, number> = {};
+            for (const ins of otherInsights) {
+              const labels = ins.labels_json as any;
+              const ht = labels?.hook_type;
+              const lb = labels?.length_bucket;
+              if (ht) hookCounts[ht] = (hookCounts[ht] || 0) + 1;
+              if (lb) bucketCounts[lb] = (bucketCounts[lb] || 0) + 1;
+            }
+            creatorContext.bestHookType =
+              Object.entries(hookCounts).sort(([, a], [, b]) => b - a)[0]?.[0] || null;
+            creatorContext.bestLengthBucket =
+              Object.entries(bucketCounts).sort(([, a], [, b]) => b - a)[0]?.[0] || null;
+          }
+        }
+      } catch (ctxError) {
+        console.warn("[Worker:ProcessVideo] Failed to fetch creator context (non-fatal):", ctxError);
+      }
+
       let insights;
       const videoMeta = {
         caption: video.caption,
@@ -254,14 +306,14 @@ export async function POST(request: NextRequest) {
       };
 
       if (frameUrls.length > 0) {
-        insights = await generateMultimodalInsights(transcript, frameUrls, videoMeta);
+        insights = await generateMultimodalInsights(transcript, frameUrls, videoMeta, creatorContext);
       } else {
         const textInsights = await generateInsights(transcript, {
           duration_s: video.duration_s,
           views: video.views,
           likes: video.likes,
           comments: video.comments,
-        });
+        }, creatorContext);
         insights = { ...textInsights, visual_notes: undefined };
       }
 
@@ -277,6 +329,7 @@ export async function POST(request: NextRequest) {
             labels_json: insights.labels,
             visual_notes_json: insights.visual_notes || null,
             cta_analysis_json: insights.cta_analysis || null,
+            recommendations_json: insights.recommendations || null,
             analysis_version: ANALYSIS_VERSION,
             analysis_hash: currentHash,
           },

@@ -25,12 +25,43 @@ const CTAAnalysisSchema = z.object({
   cta_reasoning: z.string().min(1),
 });
 
+const RecommendationsSchema = z.object({
+  // REPEAT fields
+  template_structure: z.object({
+    hook_type: z.string(),
+    body_format: z.string(),
+    cta_timing_window: z.string(),
+  }).optional(),
+  hook_rewrites: z.array(z.string()).min(1).max(3).optional(),
+  suggested_next_topic: z.string().optional(),
+  // MODIFY fields
+  change_instructions: z.array(z.object({
+    instruction: z.string().min(1),
+    reasoning: z.string().min(1),
+  })).min(1).optional(),
+  performance_delta: z.object({
+    video_like_rate: z.number(),
+    creator_median_like_rate: z.number().nullable(),
+    delta_description: z.string(),
+  }).nullable().optional(),
+  // STOP fields
+  pattern_explanation: z.string().optional(),
+  cluster_failure_reason: z.string().optional(),
+  suggested_alternative: z.object({
+    format: z.string(),
+    hook_type: z.string(),
+    length_bucket: z.string(),
+    reasoning: z.string(),
+  }).optional(),
+});
+
 const InsightSchema = z.object({
   verdict: z.enum(["REPEAT", "MODIFY", "STOP"]),
   why: z.array(z.string()).min(2).max(3),
   next_action: z.string().min(1),
   labels: InsightLabelsSchema,
   cta_analysis: CTAAnalysisSchema,
+  recommendations: RecommendationsSchema,
 });
 
 export type InsightLabels = z.infer<typeof InsightLabelsSchema>;
@@ -57,7 +88,8 @@ Output format (STRICT):
     "cta_position_percent": 0-100 | null,
     "cta_timing": "EARLY" | "MID" | "LATE" | "NONE",
     "cta_reasoning": "1-2 sentences explaining why this CTA placement is effective or ineffective for THIS specific video, considering the content type, audience retention patterns, and video length"
-  }
+  },
+  "recommendations": { ... verdict-specific, see below ... }
 }
 
 Rules:
@@ -83,7 +115,43 @@ CTA Detection Rules:
   - For short videos (<15s): early CTAs can feel pushy, but viewers drop off fast
   - For longer videos (40+s): most viewers won't reach a late CTA, so earlier is usually better
   - For story-driven content: a mid-point CTA can break flow, so end-of-story placement may work better
-  - Always reference the specific video length and content type in your reasoning`;
+  - Always reference the specific video length and content type in your reasoning
+
+Instruction-Level Recommendations:
+You MUST include a "recommendations" object. Its structure depends on the verdict:
+
+If verdict = "REPEAT":
+"recommendations": {
+  "template_structure": { "hook_type": "the hook type that worked", "body_format": "the body format", "cta_timing_window": "when the CTA should go" },
+  "hook_rewrites": ["rewrite 1 (same tone, improved clarity)", "rewrite 2 (different angle)", "rewrite 3 (punchy variant)"],
+  "suggested_next_topic": "A specific topic angle to explore next, based on what worked"
+}
+- hook_rewrites: rewrite the opening hook from the transcript 3 different ways. Keep the same tone and target audience. Improve clarity and scroll-stopping power.
+- suggested_next_topic: suggest a concrete next video topic that leverages the same winning formula.
+
+If verdict = "MODIFY":
+"recommendations": {
+  "change_instructions": [{ "instruction": "Exact measurable change (e.g. 'Move CTA from 45s to 20-30s', 'Cut intro from 12s to 4s')", "reasoning": "Why this helps" }],
+  "performance_delta": { "video_like_rate": <likes/views*100>, "creator_median_like_rate": <from creator context or null>, "delta_description": "X% below/above your median" }
+}
+- change_instructions: 1-3 specific, actionable changes with time codes or measurable targets. No vague advice.
+- performance_delta: compare this video's like rate to the creator's median (provided in context). If no creator context, set creator_median_like_rate to null and delta_description to "Not enough prior data".
+
+If verdict = "STOP":
+"recommendations": {
+  "pattern_explanation": "Clear 1-2 sentence explanation of WHY this content pattern fails",
+  "cluster_failure_reason": "What specific combination (hook + format + length) is underperforming and why",
+  "suggested_alternative": { "format": "one of TALKING_HEAD|BROLL|MONTAGE|TEXT_ON_SCREEN|MIXED", "hook_type": "one of QUESTION|BOLD_CLAIM|STORY|PROBLEM_SOLUTION|OTHER", "length_bucket": "one of <15|15-25|25-40|40+", "reasoning": "Why this alternative would work better" }
+}
+- Use creator context (if available) to suggest the alternative that actually works for this creator.
+- If no creator context, suggest based on general TikTok best practices.`;
+
+export interface CreatorContext {
+  medianLikeRate: number | null;
+  bestHookType: string | null;
+  bestLengthBucket: string | null;
+  analyzedCount: number;
+}
 
 export async function generateInsights(
   transcript: string,
@@ -92,13 +160,14 @@ export async function generateInsights(
     views: number;
     likes: number;
     comments: number;
-  }
+  },
+  creatorContext?: CreatorContext
 ): Promise<Insight> {
   if (!KIMI_API_KEY) {
     throw new Error("KIMI_API_KEY is not configured");
   }
 
-  const userPrompt = buildUserPrompt(transcript, videoMeta);
+  const userPrompt = buildUserPrompt(transcript, videoMeta, creatorContext);
 
   console.log("[Kimi] Generating insights...");
 
@@ -148,7 +217,7 @@ async function callKimiAPI(userMessage: string): Promise<string> {
         },
       ],
       temperature: 0.3,
-      max_tokens: 1000,
+      max_tokens: 1500,
     }),
   });
 
@@ -208,7 +277,8 @@ function buildUserPrompt(
     views: number;
     likes: number;
     comments: number;
-  }
+  },
+  creatorContext?: CreatorContext
 ): string {
   let prompt = `Analyze this TikTok video transcript:
 
@@ -228,6 +298,19 @@ Video metrics:
 `;
   }
 
+  if (creatorContext && creatorContext.analyzedCount > 0) {
+    prompt += `
+Creator context (for comparison and recommendations):
+- Median like rate: ${creatorContext.medianLikeRate !== null ? creatorContext.medianLikeRate.toFixed(2) + "%" : "N/A"} (based on ${creatorContext.analyzedCount} analyzed videos)
+- Best performing hook type: ${creatorContext.bestHookType || "N/A"} (from REPEAT videos)
+- Best performing length: ${creatorContext.bestLengthBucket || "N/A"} (from REPEAT videos)
+`;
+  } else {
+    prompt += `
+Creator context: No prior analyzed videos available. Base recommendations on general TikTok best practices.
+`;
+  }
+
   prompt += `
 Provide insights in STRICT JSON format (no markdown):`;
 
@@ -242,6 +325,7 @@ const MultimodalInsightSchema = z.object({
   next_action: z.string().min(1),
   labels: InsightLabelsSchema,
   cta_analysis: CTAAnalysisSchema,
+  recommendations: RecommendationsSchema,
   visual_notes: z.array(z.string()).max(5).optional(),
 });
 
@@ -271,6 +355,7 @@ Output format (STRICT):
     "cta_timing": "EARLY" | "MID" | "LATE" | "NONE",
     "cta_reasoning": "1-2 sentences explaining why this CTA placement is effective or ineffective for THIS specific video, considering the content type, audience retention patterns, and video length"
   },
+  "recommendations": { ... verdict-specific, see below ... },
   "visual_notes": ["note about visual element 1", "note about visual element 2"]
 }
 
@@ -298,7 +383,36 @@ CTA Detection Rules:
   - For short videos (<15s): early CTAs can feel pushy, but viewers drop off fast
   - For longer videos (40+s): most viewers won't reach a late CTA, so earlier is usually better
   - For story-driven content: a mid-point CTA can break flow, so end-of-story placement may work better
-  - Always reference the specific video length and content type in your reasoning`;
+  - Always reference the specific video length and content type in your reasoning
+
+Instruction-Level Recommendations:
+You MUST include a "recommendations" object. Its structure depends on the verdict:
+
+If verdict = "REPEAT":
+"recommendations": {
+  "template_structure": { "hook_type": "the hook type that worked", "body_format": "the body format", "cta_timing_window": "when the CTA should go" },
+  "hook_rewrites": ["rewrite 1 (same tone, improved clarity)", "rewrite 2 (different angle)", "rewrite 3 (punchy variant)"],
+  "suggested_next_topic": "A specific topic angle to explore next, based on what worked"
+}
+- hook_rewrites: rewrite the opening hook from the transcript 3 different ways. Keep the same tone and target audience. Improve clarity and scroll-stopping power.
+- suggested_next_topic: suggest a concrete next video topic that leverages the same winning formula.
+
+If verdict = "MODIFY":
+"recommendations": {
+  "change_instructions": [{ "instruction": "Exact measurable change (e.g. 'Move CTA from 45s to 20-30s', 'Cut intro from 12s to 4s')", "reasoning": "Why this helps" }],
+  "performance_delta": { "video_like_rate": <likes/views*100>, "creator_median_like_rate": <from creator context or null>, "delta_description": "X% below/above your median" }
+}
+- change_instructions: 1-3 specific, actionable changes with time codes or measurable targets. No vague advice.
+- performance_delta: compare this video's like rate to the creator's median (provided in context). If no creator context, set creator_median_like_rate to null and delta_description to "Not enough prior data".
+
+If verdict = "STOP":
+"recommendations": {
+  "pattern_explanation": "Clear 1-2 sentence explanation of WHY this content pattern fails",
+  "cluster_failure_reason": "What specific combination (hook + format + length) is underperforming and why",
+  "suggested_alternative": { "format": "one of TALKING_HEAD|BROLL|MONTAGE|TEXT_ON_SCREEN|MIXED", "hook_type": "one of QUESTION|BOLD_CLAIM|STORY|PROBLEM_SOLUTION|OTHER", "length_bucket": "one of <15|15-25|25-40|40+", "reasoning": "Why this alternative would work better" }
+}
+- Use creator context (if available) to suggest the alternative that actually works for this creator.
+- If no creator context, suggest based on general TikTok best practices.`;
 
 export async function generateMultimodalInsights(
   transcript: string,
@@ -309,7 +423,8 @@ export async function generateMultimodalInsights(
     views: number;
     likes: number;
     comments: number;
-  }
+  },
+  creatorContext?: CreatorContext
 ): Promise<MultimodalInsight> {
   if (!OPENAI_API_KEY) {
     console.warn("[Insights] No OPENAI_API_KEY, falling back to text-only Kimi");
@@ -318,7 +433,7 @@ export async function generateMultimodalInsights(
       views: videoMeta.views,
       likes: videoMeta.likes,
       comments: videoMeta.comments,
-    } : undefined);
+    } : undefined, creatorContext);
     return { ...textResult, visual_notes: undefined };
   }
 
@@ -342,6 +457,13 @@ Metrics:
 - Likes: ${videoMeta?.likes?.toLocaleString() || "N/A"}
 - Comments: ${videoMeta?.comments || "N/A"}
 - Engagement: ${engagementRate.toFixed(2)}%
+
+${creatorContext && creatorContext.analyzedCount > 0
+  ? `Creator context (for comparison and recommendations):
+- Median like rate: ${creatorContext.medianLikeRate !== null ? creatorContext.medianLikeRate.toFixed(2) + "%" : "N/A"} (based on ${creatorContext.analyzedCount} analyzed videos)
+- Best performing hook type: ${creatorContext.bestHookType || "N/A"} (from REPEAT videos)
+- Best performing length: ${creatorContext.bestLengthBucket || "N/A"} (from REPEAT videos)`
+  : "Creator context: No prior analyzed videos available. Base recommendations on general TikTok best practices."}
 
 Below are evenly-spaced keyframes from the video. Analyze the visual style, production quality, framing, text overlays, and any visual patterns.
 
@@ -371,7 +493,7 @@ Return STRICT JSON only.`,
           { role: "user", content },
         ],
         temperature: 0.3,
-        max_tokens: 1500,
+        max_tokens: 2000,
         response_format: { type: "json_object" },
       }),
     });
@@ -384,7 +506,7 @@ Return STRICT JSON only.`,
         views: videoMeta.views,
         likes: videoMeta.likes,
         comments: videoMeta.comments,
-      } : undefined);
+      } : undefined, creatorContext);
       return { ...textResult, visual_notes: undefined };
     }
 
@@ -400,7 +522,7 @@ Return STRICT JSON only.`,
         views: videoMeta.views,
         likes: videoMeta.likes,
         comments: videoMeta.comments,
-      } : undefined);
+      } : undefined, creatorContext);
       return { ...textResult, visual_notes: undefined };
     }
 
@@ -412,7 +534,7 @@ Return STRICT JSON only.`,
       views: videoMeta.views,
       likes: videoMeta.likes,
       comments: videoMeta.comments,
-    } : undefined);
+    } : undefined, creatorContext);
     return { ...textResult, visual_notes: undefined };
   }
 }

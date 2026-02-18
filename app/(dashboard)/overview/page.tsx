@@ -11,9 +11,11 @@ import VerdictChart from "@/components/charts/VerdictChart";
 import CadenceChart from "@/components/charts/CadenceChart";
 import LikeRateChart from "@/components/charts/LikeRateChart";
 import { getActiveCreatorId } from "@/lib/creatorContext";
-import { recomputeDashboardCache, retryFailedVideo } from "@/lib/api";
+import { recomputeDashboardCache, retryFailedVideo, acknowledgeInsights } from "@/lib/api";
 import ConfidenceSnapshotCard from "@/components/ConfidenceSnapshot";
 import AnalysisProgress from "@/components/AnalysisProgress";
+import WeeklySnapshotCard from "@/components/WeeklySnapshotCard";
+import PlaybookCard from "@/components/PlaybookCard";
 
 interface DashboardData {
   creator: any;
@@ -36,6 +38,10 @@ interface DashboardData {
     analysis_ready: boolean;
   };
   cached_dashboard: any;
+  playbook?: any;
+  next_post?: any;
+  has_new_insights?: boolean;
+  new_insight_count?: number;
 }
 
 export default function OverviewPage() {
@@ -46,6 +52,7 @@ export default function OverviewPage() {
   const [error, setError] = useState<string | null>(null);
   const [recomputing, setRecomputing] = useState(false);
   const [retryingVideos, setRetryingVideos] = useState<Set<string>>(new Set());
+  const [insightsBannerDismissed, setInsightsBannerDismissed] = useState(false);
 
   useEffect(() => {
     const id = getActiveCreatorId();
@@ -108,6 +115,17 @@ export default function OverviewPage() {
       console.error("Failed to recompute:", err);
     } finally {
       setRecomputing(false);
+    }
+  };
+
+  const handleDismissInsightsBanner = async () => {
+    setInsightsBannerDismissed(true);
+    if (creatorId) {
+      try {
+        await acknowledgeInsights(creatorId);
+      } catch (err) {
+        console.error("Failed to acknowledge insights:", err);
+      }
     }
   };
 
@@ -186,6 +204,33 @@ export default function OverviewPage() {
         </div>
       </div>
 
+      {/* Re-engagement Banner */}
+      {data.has_new_insights && !insightsBannerDismissed && (
+        <Card glow className="border-gold/30 bg-gold/5">
+          <CardContent className="pt-6">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="text-2xl">&#9733;</div>
+                <div>
+                  <p className="font-semibold text-gold">
+                    {data.new_insight_count || 3} new performance insights discovered since your last visit.
+                  </p>
+                  <p className="text-sm text-foreground/60 mt-1">
+                    Scroll down to see your latest weekly snapshot and recommendations.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={handleDismissInsightsBanner}
+                className="px-4 py-2 bg-gold/20 text-gold font-medium rounded-lg hover:bg-gold/30 transition-colors text-sm flex-shrink-0"
+              >
+                Got it
+              </button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Processing Status Banner */}
       {isProcessing && (
         <Card className="border-amber-500/30 bg-amber-500/5">
@@ -218,6 +263,16 @@ export default function OverviewPage() {
             totalIngested={analysis_progress.total_ingested}
           />
         )
+      )}
+
+      {/* Creator Playbook */}
+      {data.playbook && (
+        <PlaybookCard playbook={data.playbook} nextPost={data.next_post || null} />
+      )}
+
+      {/* Weekly Snapshot Card */}
+      {weekly_summary?.snapshot && (
+        <WeeklySnapshotCard summary={weekly_summary} />
       )}
 
       {/* Stats Grid */}

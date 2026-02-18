@@ -97,3 +97,15 @@ export async function fetchVideoAssets(videoId: string) {
 
   return response.json();
 }
+
+export async function acknowledgeInsights(creatorId: string) {
+  const response = await fetch(`/api/creators/${creatorId}/acknowledge`, {
+    method: "POST",
+  });
+
+  if (!response.ok) {
+    throw new Error("Failed to acknowledge insights");
+  }
+
+  return response.json();
+}

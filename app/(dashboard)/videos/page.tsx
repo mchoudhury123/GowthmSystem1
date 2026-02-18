@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import Card, { CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import Badge from "@/components/ui/Badge";
 import Modal from "@/components/ui/Modal";
-import { Video } from "@/lib/types";
+import { Video, RepeatRecommendations, ModifyRecommendations, StopRecommendations } from "@/lib/types";
 import { getActiveCreatorId } from "@/lib/creatorContext";
 import { fetchVideoAssets, retryFailedVideo } from "@/lib/api";
 
@@ -277,6 +277,152 @@ export default function VideosPage() {
                     {selectedVideo.insight.next_action}
                   </p>
                 </div>
+
+                {/* Recommendations */}
+                {selectedVideo.insight.recommendations && (() => {
+                  const recs = selectedVideo.insight.recommendations;
+                  const verdict = selectedVideo.insight.verdict;
+
+                  if (verdict === "REPEAT") {
+                    const r = recs as RepeatRecommendations;
+                    return (
+                      <div>
+                        <h3 className="text-sm font-semibold text-foreground/60 mb-3">Recommendations</h3>
+                        <div className="space-y-4">
+                          {r.template_structure && (
+                            <div>
+                              <p className="text-xs text-foreground/50 uppercase tracking-wide mb-2">Template to Reuse</p>
+                              <div className="grid grid-cols-3 gap-3">
+                                <div className="bg-charcoal-light rounded-lg p-3 border border-accent-green/20">
+                                  <p className="text-xs text-foreground/50 mb-1">Hook Type</p>
+                                  <p className="text-sm text-accent-green font-medium">{r.template_structure.hook_type.replace(/_/g, " ")}</p>
+                                </div>
+                                <div className="bg-charcoal-light rounded-lg p-3 border border-accent-green/20">
+                                  <p className="text-xs text-foreground/50 mb-1">Body Format</p>
+                                  <p className="text-sm text-accent-green font-medium">{r.template_structure.body_format.replace(/_/g, " ")}</p>
+                                </div>
+                                <div className="bg-charcoal-light rounded-lg p-3 border border-accent-green/20">
+                                  <p className="text-xs text-foreground/50 mb-1">CTA Window</p>
+                                  <p className="text-sm text-accent-green font-medium">{r.template_structure.cta_timing_window}</p>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                          {r.hook_rewrites && r.hook_rewrites.length > 0 && (
+                            <div>
+                              <p className="text-xs text-foreground/50 uppercase tracking-wide mb-2">Hook Rewrites</p>
+                              <ol className="space-y-2">
+                                {r.hook_rewrites.map((rewrite, idx) => (
+                                  <li key={idx} className="flex items-start gap-3 text-sm">
+                                    <span className="text-gold font-bold min-w-[1.5rem]">{idx + 1}.</span>
+                                    <span className="text-foreground/80 italic">&ldquo;{rewrite}&rdquo;</span>
+                                  </li>
+                                ))}
+                              </ol>
+                            </div>
+                          )}
+                          {r.suggested_next_topic && (
+                            <div className="bg-gold/10 border border-gold/20 rounded-lg p-3">
+                              <p className="text-xs text-foreground/50 uppercase tracking-wide mb-1">Suggested Next Topic</p>
+                              <p className="text-sm text-gold italic">{r.suggested_next_topic}</p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  if (verdict === "MODIFY") {
+                    const r = recs as ModifyRecommendations;
+                    return (
+                      <div>
+                        <h3 className="text-sm font-semibold text-foreground/60 mb-3">Recommendations</h3>
+                        <div className="space-y-4">
+                          {r.change_instructions && r.change_instructions.length > 0 && (
+                            <div>
+                              <p className="text-xs text-foreground/50 uppercase tracking-wide mb-2">What to Change</p>
+                              <div className="space-y-2">
+                                {r.change_instructions.map((ci, idx) => (
+                                  <div key={idx} className="bg-charcoal-light rounded-lg p-3 border border-accent-amber/20">
+                                    <p className="text-sm text-accent-amber font-medium mb-1">
+                                      {idx + 1}. {ci.instruction}
+                                    </p>
+                                    <p className="text-xs text-foreground/60">{ci.reasoning}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {r.performance_delta && (
+                            <div>
+                              <p className="text-xs text-foreground/50 uppercase tracking-wide mb-2">Performance vs Your Average</p>
+                              <div className="bg-charcoal-light rounded-lg p-3 border border-charcoal-lighter">
+                                <div className="flex items-center justify-between mb-2">
+                                  <div>
+                                    <p className="text-xs text-foreground/50">This Video</p>
+                                    <p className="text-lg font-bold text-foreground">{r.performance_delta.video_like_rate.toFixed(1)}%</p>
+                                  </div>
+                                  {r.performance_delta.creator_median_like_rate !== null && (
+                                    <div className="text-right">
+                                      <p className="text-xs text-foreground/50">Your Median</p>
+                                      <p className="text-lg font-bold text-foreground">{r.performance_delta.creator_median_like_rate.toFixed(1)}%</p>
+                                    </div>
+                                  )}
+                                </div>
+                                <p className="text-xs text-accent-amber">{r.performance_delta.delta_description}</p>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  if (verdict === "STOP") {
+                    const r = recs as StopRecommendations;
+                    return (
+                      <div>
+                        <h3 className="text-sm font-semibold text-foreground/60 mb-3">Recommendations</h3>
+                        <div className="space-y-4">
+                          {r.pattern_explanation && (
+                            <div className="bg-accent-red/10 border border-accent-red/20 rounded-lg p-3">
+                              <p className="text-xs text-foreground/50 uppercase tracking-wide mb-1">Why This Isn&apos;t Working</p>
+                              <p className="text-sm text-accent-red">{r.pattern_explanation}</p>
+                            </div>
+                          )}
+                          {r.cluster_failure_reason && (
+                            <div>
+                              <p className="text-xs text-foreground/50 uppercase tracking-wide mb-1">Failure Pattern</p>
+                              <p className="text-sm text-foreground/70">{r.cluster_failure_reason}</p>
+                            </div>
+                          )}
+                          {r.suggested_alternative && (
+                            <div>
+                              <p className="text-xs text-foreground/50 uppercase tracking-wide mb-2">Try This Instead</p>
+                              <div className="grid grid-cols-3 gap-3 mb-2">
+                                <div className="bg-charcoal-light rounded-lg p-3 border border-accent-green/20">
+                                  <p className="text-xs text-foreground/50 mb-1">Format</p>
+                                  <p className="text-sm text-accent-green font-medium">{r.suggested_alternative.format.replace(/_/g, " ")}</p>
+                                </div>
+                                <div className="bg-charcoal-light rounded-lg p-3 border border-accent-green/20">
+                                  <p className="text-xs text-foreground/50 mb-1">Hook Type</p>
+                                  <p className="text-sm text-accent-green font-medium">{r.suggested_alternative.hook_type.replace(/_/g, " ")}</p>
+                                </div>
+                                <div className="bg-charcoal-light rounded-lg p-3 border border-accent-green/20">
+                                  <p className="text-xs text-foreground/50 mb-1">Length</p>
+                                  <p className="text-sm text-accent-green font-medium">{r.suggested_alternative.length_bucket}s</p>
+                                </div>
+                              </div>
+                              <p className="text-xs text-foreground/60 italic">{r.suggested_alternative.reasoning}</p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  return null;
+                })()}
 
                 {/* Labels */}
                 <div>

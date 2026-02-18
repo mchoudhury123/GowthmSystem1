@@ -26,11 +26,13 @@ export async function GET(
       .eq("creator_id", id)
       .single();
 
-    // Fetch weekly summary
+    // Fetch latest weekly summary (now supports multiple per creator, one per week)
     const { data: weekly_summary } = await supabaseServer
       .from("weekly_summary")
       .select("*")
       .eq("creator_id", id)
+      .order("week_start", { ascending: false, nullsFirst: false })
+      .limit(1)
       .single();
 
     // Fetch videos ordered by actual TikTok post date (created_at_ts), not DB insert time
@@ -66,6 +68,7 @@ export async function GET(
         labels: insight.labels_json,
         visual_notes: insight.visual_notes_json || null,
         cta_analysis: insight.cta_analysis_json || null,
+        recommendations: insight.recommendations_json || null,
         created_at: insight.created_at,
       };
     }
@@ -127,14 +130,60 @@ export async function GET(
       .eq("creator_id", id)
       .single();
 
+    // Fetch creator playbook
+    const { data: playbook } = await supabaseServer
+      .from("creator_playbook")
+      .select("*")
+      .eq("creator_id", id)
+      .single();
+
+    // Fetch next post recommendation
+    const { data: nextPost } = await supabaseServer
+      .from("creator_next_post")
+      .select("*")
+      .eq("creator_id", id)
+      .single();
+
+    // Detect new insights since last login
+    const lastLogin = creator.last_login_at
+      ? new Date(creator.last_login_at)
+      : null;
+    const latestSnapshotAt = weekly_summary?.created_at
+      ? new Date(weekly_summary.created_at)
+      : null;
+    const hasNewInsights =
+      !!latestSnapshotAt &&
+      !!weekly_summary?.snapshot_json &&
+      (!lastLogin || latestSnapshotAt > lastLogin);
+
+    // Count new insight bullets for the banner message
+    const newInsightCount = hasNewInsights
+      ? weekly_summary?.insight_bullets?.length || 3
+      : 0;
+
     return NextResponse.json({
       creator,
       creator_profile: creatorProfile || null,
-      weekly_summary,
+      weekly_summary: weekly_summary
+        ? {
+            ...weekly_summary,
+            do_more: weekly_summary.do_more_json,
+            stop_doing: weekly_summary.stop_doing_json,
+            snapshot: weekly_summary.snapshot_json || null,
+            deltas: weekly_summary.deltas_json || null,
+            drift_flags: weekly_summary.drift_flags || [],
+            insight_bullets: weekly_summary.insight_bullets || [],
+            recommendation: weekly_summary.recommendation || null,
+          }
+        : null,
       recent_videos,
       processing_stats,
       analysis_progress,
       cached_dashboard: cachedDashboard?.cache_json || null,
+      playbook: playbook || null,
+      next_post: nextPost || null,
+      has_new_insights: hasNewInsights,
+      new_insight_count: newInsightCount,
     });
   } catch (error) {
     return NextResponse.json(
