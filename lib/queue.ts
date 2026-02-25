@@ -4,7 +4,7 @@
 
 import { MAX_RETRIES } from "@/lib/config";
 
-interface QueueJob<T = unknown> {
+export interface QueueJob<T = unknown> {
   id: string;
   type: string;
   payload: T;
@@ -20,7 +20,21 @@ interface UpstashResponse {
   error?: string;
 }
 
-export class UpstashQueue {
+export interface IQueue {
+  enqueue<T>(queueName: string, payload: T, maxAttempts?: number): Promise<string | null>;
+  isEnqueued(queueName: string, dedupId: string): Promise<boolean>;
+  dequeue(queueName: string, timeoutSeconds?: number): Promise<QueueJob | null>;
+  complete(queueName: string, jobId: string): Promise<void>;
+  fail(queueName: string, job: QueueJob, error: string): Promise<void>;
+  recoverStuckJobs(queueName: string, maxAgeMs?: number): Promise<number>;
+  acquireLock(key: string, ttlSeconds: number): Promise<boolean>;
+  releaseLock(key: string): Promise<void>;
+  getQueueLength(queueName: string): Promise<number>;
+  getProcessingLength(queueName: string): Promise<number>;
+  healthCheck(): Promise<boolean>;
+}
+
+export class UpstashQueue implements IQueue {
   private restUrl: string;
   private restToken: string;
 
@@ -285,12 +299,185 @@ export class UpstashQueue {
   }
 }
 
-// Singleton instance
-let queueInstance: UpstashQueue | null = null;
+// ──────────────────────────────────────────────────────────────
+// In-memory queue fallback for local development
+// ──────────────────────────────────────────────────────────────
 
-export function getQueue(): UpstashQueue {
+export class InMemoryQueue implements IQueue {
+  private queues: Map<string, QueueJob[]> = new Map();
+  private processing: Map<string, QueueJob[]> = new Map();
+  private dedupSets: Map<string, Set<string>> = new Map();
+  private dlqs: Map<string, QueueJob[]> = new Map();
+  private locks: Map<string, number> = new Map();
+
+  private getOrCreateQueue(name: string): QueueJob[] {
+    if (!this.queues.has(name)) this.queues.set(name, []);
+    return this.queues.get(name)!;
+  }
+
+  private getOrCreateProcessing(name: string): QueueJob[] {
+    if (!this.processing.has(name)) this.processing.set(name, []);
+    return this.processing.get(name)!;
+  }
+
+  private getOrCreateDedupSet(name: string): Set<string> {
+    if (!this.dedupSets.has(name)) this.dedupSets.set(name, new Set());
+    return this.dedupSets.get(name)!;
+  }
+
+  async enqueue<T>(queueName: string, payload: T, maxAttempts: number = MAX_RETRIES): Promise<string | null> {
+    const dedupId =
+      (payload as Record<string, unknown>).videoId as string ||
+      (payload as Record<string, unknown>).creatorId as string ||
+      "";
+
+    if (dedupId) {
+      const dedupSet = this.getOrCreateDedupSet(queueName);
+      if (dedupSet.has(dedupId)) {
+        console.log(`[InMemoryQueue] Skipping duplicate: ${dedupId} already in ${queueName}`);
+        return null;
+      }
+      dedupSet.add(dedupId);
+    }
+
+    const job: QueueJob<T> = {
+      id: `${queueName}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      type: queueName,
+      payload,
+      attempts: 0,
+      maxAttempts,
+      createdAt: Date.now(),
+      dedupId,
+    };
+
+    this.getOrCreateQueue(queueName).push(job);
+    return job.id;
+  }
+
+  async isEnqueued(queueName: string, dedupId: string): Promise<boolean> {
+    return this.getOrCreateDedupSet(queueName).has(dedupId);
+  }
+
+  async dequeue(queueName: string, _timeoutSeconds: number = 5): Promise<QueueJob | null> {
+    const queue = this.getOrCreateQueue(queueName);
+    const job = queue.shift() ?? null;
+    if (job) {
+      this.getOrCreateProcessing(queueName).push(job);
+    }
+    return job;
+  }
+
+  async complete(queueName: string, jobId: string): Promise<void> {
+    const list = this.getOrCreateProcessing(queueName);
+    const idx = list.findIndex((j) => j.id === jobId);
+    if (idx !== -1) {
+      const [job] = list.splice(idx, 1);
+      if (job.dedupId) {
+        this.getOrCreateDedupSet(queueName).delete(job.dedupId);
+      }
+    }
+  }
+
+  async fail(queueName: string, job: QueueJob, error: string): Promise<void> {
+    const list = this.getOrCreateProcessing(queueName);
+    const idx = list.findIndex((j) => j.id === job.id);
+    if (idx !== -1) list.splice(idx, 1);
+
+    job.attempts += 1;
+    job.error = error;
+
+    if (job.attempts < job.maxAttempts) {
+      console.log(`[InMemoryQueue] Re-queuing job ${job.id} (attempt ${job.attempts}/${job.maxAttempts})`);
+      this.getOrCreateQueue(queueName).push(job);
+    } else {
+      console.error(`[InMemoryQueue] Job ${job.id} failed after ${job.attempts} attempts:`, error);
+      if (!this.dlqs.has(queueName)) this.dlqs.set(queueName, []);
+      this.dlqs.get(queueName)!.push(job);
+      if (job.dedupId) {
+        this.getOrCreateDedupSet(queueName).delete(job.dedupId);
+      }
+    }
+  }
+
+  async recoverStuckJobs(queueName: string, maxAgeMs: number = 10 * 60 * 1000): Promise<number> {
+    const list = this.getOrCreateProcessing(queueName);
+    const now = Date.now();
+    let recovered = 0;
+
+    for (let i = list.length - 1; i >= 0; i--) {
+      const job = list[i];
+      if (now - job.createdAt > maxAgeMs) {
+        list.splice(i, 1);
+        job.attempts += 1;
+        job.error = "Recovered from stuck state";
+
+        if (job.attempts < job.maxAttempts) {
+          this.getOrCreateQueue(queueName).push(job);
+        } else {
+          if (!this.dlqs.has(queueName)) this.dlqs.set(queueName, []);
+          this.dlqs.get(queueName)!.push(job);
+          if (job.dedupId) {
+            this.getOrCreateDedupSet(queueName).delete(job.dedupId);
+          }
+        }
+        recovered++;
+      }
+    }
+    return recovered;
+  }
+
+  async acquireLock(key: string, ttlSeconds: number): Promise<boolean> {
+    const now = Date.now();
+    const existing = this.locks.get(key);
+    if (existing !== undefined && existing > now) return false;
+    this.locks.set(key, now + ttlSeconds * 1000);
+    return true;
+  }
+
+  async releaseLock(key: string): Promise<void> {
+    this.locks.delete(key);
+  }
+
+  async getQueueLength(queueName: string): Promise<number> {
+    return this.getOrCreateQueue(queueName).length;
+  }
+
+  async getProcessingLength(queueName: string): Promise<number> {
+    return this.getOrCreateProcessing(queueName).length;
+  }
+
+  async healthCheck(): Promise<boolean> {
+    return true;
+  }
+}
+
+// Singleton instance
+let queueInstance: IQueue | null = null;
+
+export function getQueue(): IQueue {
   if (!queueInstance) {
-    queueInstance = new UpstashQueue();
+    const hasCredentials =
+      !!process.env.UPSTASH_REDIS_REST_URL && !!process.env.UPSTASH_REDIS_REST_TOKEN;
+
+    if (hasCredentials) {
+      queueInstance = new UpstashQueue();
+    } else if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN must be set in production"
+      );
+    } else {
+      console.warn(
+        "\n" +
+        "╔══════════════════════════════════════════════════════════════╗\n" +
+        "║  ⚠  IN-MEMORY QUEUE ACTIVE (Upstash credentials missing)  ║\n" +
+        "║                                                            ║\n" +
+        "║  Jobs will be lost on server restart.                      ║\n" +
+        "║  Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN   ║\n" +
+        "║  in .env.local for persistent queues.                      ║\n" +
+        "╚══════════════════════════════════════════════════════════════╝\n"
+      );
+      queueInstance = new InMemoryQueue();
+    }
   }
   return queueInstance;
 }

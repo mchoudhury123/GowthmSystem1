@@ -2,13 +2,30 @@
 import { promises as fs } from "fs";
 import path from "path";
 import os from "os";
-import { exec } from "child_process";
+import { exec, execSync } from "child_process";
 import { promisify } from "util";
 
 const execAsync = promisify(exec);
 
-// yt-dlp path (installed via pip, may not be on PATH)
-const YT_DLP_PATH = process.env.YT_DLP_PATH || "C:\\Users\\mfcho\\AppData\\Roaming\\Python\\Python313\\Scripts\\yt-dlp.exe";
+// Resolve absolute paths for binaries. When Next.js is launched from an IDE,
+// child shells (/bin/sh) often lack /opt/homebrew/bin on PATH.
+export function resolveBinary(name: string, envOverride?: string): string {
+  if (envOverride) return envOverride;
+  const searchPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
+  for (const dir of searchPaths) {
+    const full = path.join(dir, name);
+    try {
+      execSync(`test -x "${full}"`, { stdio: "ignore" });
+      return full;
+    } catch {
+      // not found here, try next
+    }
+  }
+  return name; // fallback to bare name
+}
+
+const FFMPEG_PATH = resolveBinary("ffmpeg", process.env.FFMPEG_PATH);
+const YT_DLP_PATH = resolveBinary("yt-dlp", process.env.YT_DLP_PATH);
 
 export interface DownloadedVideo {
   videoPath: string;
@@ -115,7 +132,7 @@ async function downloadVideoWithYtDlp(videoUrl: string, videoPath: string): Prom
  * Extract audio from a local video file using ffmpeg
  */
 async function extractAudioFromVideo(videoPath: string, audioPath: string): Promise<void> {
-  const command = `ffmpeg -i "${videoPath}" -vn -acodec libmp3lame -q:a 2 "${audioPath}" -y`;
+  const command = `"${FFMPEG_PATH}" -i "${videoPath}" -vn -acodec libmp3lame -q:a 2 "${audioPath}" -y`;
   await execAsync(command, { timeout: 60000 });
 
   const stats = await fs.stat(audioPath);

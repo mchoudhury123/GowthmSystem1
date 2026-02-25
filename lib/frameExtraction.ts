@@ -3,10 +3,12 @@ import path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { supabaseServer } from "./supabaseServer";
+import { resolveBinary } from "./videoProcessing";
 
 import { MAX_FRAMES_PER_VIDEO } from "@/lib/config";
 
 const execAsync = promisify(exec);
+const FFMPEG_PATH = resolveBinary("ffmpeg", process.env.FFMPEG_PATH);
 const BUCKET_NAME = "growthm";
 const FRAME_COUNT = MAX_FRAMES_PER_VIDEO;
 
@@ -58,7 +60,7 @@ export async function extractAndUploadFrames(
 
     try {
       // Use -ss before -i for fast seek
-      const command = `ffmpeg -ss ${timestamp.toFixed(2)} -i "${videoPath}" -frames:v 1 -q:v 2 "${framePath}" -y`;
+      const command = `"${FFMPEG_PATH}" -ss ${timestamp.toFixed(2)} -i "${videoPath}" -frames:v 1 -q:v 2 "${framePath}" -y`;
       await execAsync(command, { timeout: 15000 });
 
       // Verify frame was created

@@ -9,7 +9,7 @@ export async function POST(
   try {
     const { id } = await params;
 
-    // Reset video status to PENDING (only if currently FAILED)
+    // Reset video status to PENDING for retry (accepts any stuck/failed state)
     // Setting analysis_status = PENDING signals an explicit re-run to the worker
     const { data: video, error } = await supabaseServer
       .from("videos")
@@ -19,13 +19,13 @@ export async function POST(
         analysis_status: "PENDING",
       })
       .eq("id", id)
-      .eq("processing_status", "FAILED")
+      .in("processing_status", ["FAILED", "DOWNLOADING", "TRANSCRIBING", "EXTRACTING", "ANALYZING"])
       .select("id")
       .single();
 
     if (error || !video) {
       return NextResponse.json(
-        { error: "Video not found or not in FAILED state" },
+        { error: "Video not found or not in a retryable state" },
         { status: 400 }
       );
     }

@@ -12,12 +12,13 @@ export async function POST(request: NextRequest) {
 
     const { data, error } = await supabaseServer
       .from("creators")
-      .insert([
+      .upsert(
         {
           handle,
           niche: niche || null,
         },
-      ])
+        { onConflict: "handle" }
+      )
       .select()
       .single();
 
